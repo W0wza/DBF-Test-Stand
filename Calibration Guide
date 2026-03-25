@@ -1,0 +1,138 @@
+# Calibration Guide
+
+Before you can get accurate thrust readings in pounds, you need to calibrate the load cell. Calibration teaches the system how many raw HX711 counts equal one pound of force. You only need to do this once unless you change the load cell, the HX711 board, or the mechanical mounting.
+
+---
+
+## What you need
+
+- A known weight. A dumbbell or set of calibration weights works well. A 5 lb dumbbell is ideal. Weigh it on a kitchen scale first and write down the exact weight in pounds (for example 5.089 lb).
+- The `Calibration.ino` sketch uploaded to the ESP32.
+- Arduino IDE open with Serial Monitor.
+
+---
+
+## Mechanical setup for calibration
+
+This step is important. The load cell must be loaded in the same direction and manner as it will be during a thrust test.
+
+1. Mount the load cell rigidly on one end — clamp it to the edge of a table or bolt it to a fixture.
+2. The other end of the load cell must be free to move.
+3. Hang your known weight from the free end so it pulls straight down along the load cell axis.
+4. Make sure there is no side load, no twisting, and nothing touching the cell except the mounting and the weight.
+
+If the load cell is oriented sideways (horizontal), hang the weight with a hook or string so the force is purely axial. Do not just rest the weight on top.
+
+---
+
+## Step 1 — Get the zero reading
+
+1. Upload `Calibration.ino` to the ESP32.
+2. Open Serial Monitor at **115200 baud**.
+3. With **nothing on the load cell**, wait for the numbers to settle.
+4. Watch the numbers for about 10 seconds and pick a stable representative value.
+5. Write this down. This is your **zero_counts**.
+
+Example:
+```
+zero_counts = 30650
+```
+
+---
+
+## Step 2 — Get the loaded reading
+
+1. Hang your known weight from the free end of the load cell.
+2. Let it settle for a few seconds.
+3. Watch the Serial Monitor and collect **at least 20 readings**.
+4. Write them all down, then average them.
+5. This is your **loaded_counts**.
+
+Example of 20 readings:
+```
+1017800
+1017753
+1017651
+1017579
+1017747
+1017671
+1017732
+1017941
+1017914
+1017800
+1017820
+1017690
+1017710
+1017760
+1017800
+1017830
+1017780
+1017700
+1017690
+1017810
+```
+Average = 1017769 → use **1017769** as your loaded_counts.
+
+---
+
+## Step 3 — Calculate counts_per_lb
+
+Use this formula:
+```
+counts_per_lb = (loaded_counts - zero_counts) / known_weight_lb
+```
+
+Using the example numbers:
+```
+counts_per_lb = (1017769 - 30650) / 5.089
+counts_per_lb = 987119 / 5.089
+counts_per_lb = 193,968
+```
+
+Round to a whole number: **194000**
+
+---
+
+## Step 4 — Enter the value into ThrustStand.ino
+
+Open `ThrustStand.ino` and find this line near the top:
+```cpp
+float counts_per_lb = 206000.0;
+```
+
+Replace the number with your calculated value:
+```cpp
+float counts_per_lb = 194000.0;
+```
+
+Save and re-upload to the ESP32. Your thrust readings are now calibrated.
+
+---
+
+## Step 5 — Verify calibration
+
+1. Upload `ThrustStand.ino` with your new value.
+2. Connect to the ThrustStand WiFi and open 192.168.4.1.
+3. With nothing on the load cell, hit the Tare button.
+4. Hang your known weight again.
+5. The Current reading should match your known weight within about ±0.05 lb.
+
+If it is off by more than that, repeat the procedure using more averaged readings in Step 2.
+
+---
+
+## When to re-calibrate
+
+- You replace the load cell
+- You replace the HX711 board
+- You change the mechanical mounting significantly
+- Readings drift noticeably from known weights over time
+
+---
+
+## Tips
+
+- Always calibrate at room temperature. Temperature affects load cell output slightly.
+- Use a weight in the middle of your expected thrust range if possible. Calibrating at 5 lb is good if you expect 3–10 lb thrust.
+- Do not calibrate near the maximum load cell rating (10 kg / 22 lb). Stay below 70% of max.
+- The more readings you average in Step 2, the more accurate your calibration will be. 20 is the minimum. 50 is better.
