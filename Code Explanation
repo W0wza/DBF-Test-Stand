@@ -1,0 +1,135 @@
+# Code Explanation — ThrustStand.ino
+
+This document walks through the entire sketch section by section so you understand what every part does and why.
+
+---
+
+## Libraries
+```cpp
+#include <WiFi.h>
+#include <WebServer.h>
+#include "HX711.h"
+```
+
+- **WiFi.h** — built into the ESP32 core. Used to create the wireless access point.
+- **WebServer.h** — built into the ESP32 core. Handles HTTP requests from the browser.
+- **HX711.h** — third party library by Rob Tillaart. Handles communication with the HX711 load cell amplifier chip.
+
+---
+
+## Configuration constants
+```cpp
+const char* AP_SSID = "ThrustStand";
+const char* AP_PASS = "thrust1234";
+
+const int HX_DT  = 4;
+const int HX_SCK = 5;
+
+float counts_per_lb = 206000.0;
+```
+
+- **AP_SSID / AP_PASS** — the WiFi network name and password the ESP32 broadcasts. Change these if you want a different network name or password.
+- **HX_DT / HX_SCK** — the GPIO pins the HX711 data and clock lines are connected to. These must match your physical wiring.
+- **counts_per_lb** — your calibration constant. This is the number of raw HX711 counts that equals one pound of force. This value comes from the calibration procedure and is the only number you change when re-calibrating.
+
+---
+
+## Sample struct and readSample()
+```cpp
+struct Sample {
+  float thrust_lb;
+  float thrust_lb_raw;
+  long  counts;
+};
+
+Sample readSample() {
+  long counts = scale.read_average(3);
+  long offset = scale.get_offset();
+  float thrust_raw = (counts - offset) / counts_per_lb;
+  float thrust = thrust_raw;
+  if (thrust < 0.0f && thrust > -0.20f) thrust = 0.0f;
+  ...
+}
+```
+
+- **read_average(3)** — reads 3 samples from the HX711 and averages them. Using 3 samples is a balance between speed and noise reduction.
+- **get_offset()** — returns the tare zero point set during setup or when the Tare button is pressed.
+- **(counts - offset) / counts_per_lb** — subtracts the zero point then divides by the calibration constant to get pounds.
+- **The clamp** — values between -0.20 and 0 are snapped to 0. This prevents tiny noise from showing as negative thrust at idle. Real negative values (larger than -0.20) are kept so you can see them for debugging.
+- **thrust_lb_raw** — the unclamped value, shown in the Raw card on the dashboard. Useful for diagnosing calibration issues.
+
+---
+
+## Web server and HTML dashboard
+
+The entire dashboard (HTML, CSS, JavaScript) is stored inside the ESP32 flash memory as a raw string literal:
+```cpp
+const char INDEX_HTML[] PROGMEM = R"HTMLEND(
+  ... all the HTML/CSS/JS ...
+)HTMLEND";
+```
+
+- **PROGMEM** — stores the string in flash memory instead of RAM, saving precious RAM on the ESP32.
+- **R"HTMLEND(...)HTMLEND"** — a C++ raw string literal. Everything between the delimiters is treated as plain text. This is important because HTML and JavaScript contain characters like quotes and backslashes that would normally need escaping in a C++ string.
+
+---
+
+## Polling and the /sample endpoint
+
+The browser calls `/sample` every 500ms. The ESP32 runs `readSample()`, formats the result as JSON, and sends it back:
+```json
+{"time_s":12.50,"thrust_lb":3.142,"thrust_lb_raw":3.142,"counts":857604}
+```
+
+The browser JavaScript receives this, updates the stat cards, appends the point to the graph arrays, and redraws the canvas.
+
+---
+
+## Stopwatch logic
+```js
+if(j.thrust_lb > 0.25 && !swStarted){ swStart(); }
+```
+
+- The stopwatch does not start on page load.
+- It starts automatically the first time a thrust reading exceeds **0.25 lb**.
+- The 0.25 lb threshold prevents vibration and noise at idle from accidentally starting the timer.
+- Pause freezes the elapsed time. Resume picks up from where it left off.
+- Reset returns to 00:00.0 and waits for the next thrust event.
+- Tare and Clear both reset the stopwatch automatically.
+
+---
+
+## CSV logging
+
+Every reading is appended to a string in RAM:
+```
+time_s,thrust_lb
+0.50,0.000
+1.00,2.341
+1.50,3.102
+```
+
+- The log is trimmed when it exceeds 60,000 characters (roughly 3,000 readings) to prevent running out of RAM.
+- Clicking Download CSV fetches `/csv` which the ESP32 sends as a file download.
+- The log is lost when the ESP32 is powered off. Always download before unplugging.
+
+---
+
+## setup() and loop()
+```cpp
+void setup() {
+  scale.begin(HX_DT, HX_SCK);
+  scale.set_gain(128);
+  scale.tare(30);
+  WiFi.softAP(AP_SSID, AP_PASS);
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+}
+```
+
+- **set_gain(128)** — sets the HX711 to Channel A at 128x gain. This is the standard setting for a 350 ohm load cell.
+- **tare(30)** — takes 30 readings at startup to establish the zero point with no load on the cell.
+- **loop()** only calls `handleClient()`. All the work happens inside the HTTP handler functions when the browser makes a request.
