@@ -76,9 +76,9 @@ A wireless thrust measurement system for RC motors and propellers built with an 
 | `CALIBRATION_GUIDE.md` | Step by step calibration instructions |
 | `CODE_EXPLAINED.md` | Full walkthrough of how the code works |
 
-## Notes
+## MUST READ VERY IMPORTANT
 
-- The load cell is rated to 10 kg (~22 lb). Do not exceed this.
+- The load cell is rated to 10 kg (~22 lb). DO NOT EXCEED THIS.
 - Always tare the scale before a test run with no load on the cell.
 - If thrust reads negative, swap the GRN and WHT wires on the HX711.
-- The CSV log is stored in ESP32 RAM and resets when power is removed. Download it before unplugging.
+- The CSV log is stored in ESP32 RAM and resets when power is removed. DOWNLOAD DATA BEFORE UNPLUGGING.
