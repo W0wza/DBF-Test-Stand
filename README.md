@@ -16,9 +16,9 @@ A wireless thrust measurement system for RC motors and propellers built with an 
 
 | Part | Link |
 |------|------|
-| ESP32 Dev Module (ESP-WROOM-32) | Amazon |
-| SparkFun HX711 Load Cell Amplifier | SparkFun SEN-13879 |
-| Phidgets S-Type Load Cell 10kg | Phidgets 1305 |
+| ESP32 Dev Module (ESP-WROOM-32) | [Amazon](https://www.amazon.com/ESP-WROOM-32-Development-Microcontroller-Integrated-Compatible/dp/B08D5ZD528?th=1) |
+| SparkFun HX711 Load Cell Amplifier | [SparkFun SEN-13879](https://www.sparkfun.com/sparkfun-load-cell-amplifier-hx711.html) |
+| Phidgets S-Type Load Cell 10kg | [Phidgets 1305](https://www.phidgets.com/?prodid=1305) |
 
 ## Wiring
 
