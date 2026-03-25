@@ -19,6 +19,16 @@ A wireless thrust measurement system for RC motors and propellers built with an 
 | ESP32 Dev Module (ESP-WROOM-32) | [Amazon](https://www.amazon.com/ESP-WROOM-32-Development-Microcontroller-Integrated-Compatible/dp/B08D5ZD528?th=1) |
 | SparkFun HX711 Load Cell Amplifier | [SparkFun SEN-13879](https://www.sparkfun.com/sparkfun-load-cell-amplifier-hx711.html) |
 | Phidgets S-Type Load Cell 10kg | [Phidgets 1305](https://www.phidgets.com/?prodid=1305) |
+| 6ft Micro USB Cable 2-Pack | https://www.amazon.com/Ruaeoda-Pet-Proof-Charging-Lifespan-Controller/dp/B0D7RZJSPS/ref=sr_1_4?crid=3G2WVE9Y4596D&dib=eyJ2IjoiMSJ9._mH12OXXLPe8yOEf8iz2XxJXTuBfTR_JVlGjT5444wUlWP1c1utRN32tFcMsKpxSN7TXyqtFq8LeBGblg_BKpd9tnxRG-ba5Dpr_yZ5A2Q-z5xramcQ_8u1kYZakBuT2aAypEF8jWMCFl5IiNE22gP-_0RROEEjClhMFI-mNPx3nAW-gqBiAh4Dyj4UNt45HYBQhvz5DURDaKl3mPzSdk0ARwy7656IQdVT4pj_KHo8.6Z7EJ4P_ug0nMhr-gHK_aI3Iyh9R0qLOvUvQp-MzUu8&dib_tag=se&keywords=usb%2Ba%2Bto%2Bmicro%2Busb%2B6ft&qid=1774474694&sprefix=usb%2Ba%2Bto%2Bmicro%2Busb%2B6ft%2Caps%2C215&sr=8-4&th=1|
+
+
+
+## Optional Parts
+| Part | Link |
+|------|------|
+| Anker Power Bank | [[Amazon](https://www.amazon.com/ESP-WROOM-32-Development-Microcontroller-Integrated-Compatible/dp/B08D5ZD528?th=1)](https://www.amazon.com/Anker-Travel-Ready-Technology-High-Speed-Output%EF%BC%88Black%EF%BC%89%EF%BC%8C1pack/dp/B0D5CLSMFB/ref=sr_1_4?crid=3CHMQSVQL48E5&dib=eyJ2IjoiMSJ9.SHsRVlUQTmF5onGaXYOGwIv8Qd9j8DFnXBLfmJUuxqWF9JZaFxj0gkmiGCxsVop7lF6G5CnYpR8rQR203sqbOLGl5SXRXvqjYoE50TuD-vweMTETBZKxf0f1gAAZP-P2K5DryNjhkgS-o8z6R2PAkHj6fKzPFOICns6ow0klvm000ZLyWS1eoDxevTQN-P4w8xWQwgbEvQyS7i-n33u0dmTrlsZxp-d3jYXLEVOIY2c.SyWUk5itz6tJoHcFuAlTHX2axGv1IlExHrFk8fey8uM&dib_tag=se&keywords=anker%2Bbattery%2Bpack&qid=1774474629&sprefix=anker%2Bbattery%2Bpack%2Caps%2C211&sr=8-4&th=1) |
+
+
 
 ## Wiring
 
@@ -52,7 +62,7 @@ A wireless thrust measurement system for RC motors and propellers built with an 
 
 ## Usage
 
-1. Power the ESP32
+1. Power the ESP32 Via the battery pack
 2. On your phone or laptop, connect to WiFi: **ThrustStand** / password: **thrust1234**
 3. Open a browser and go to **192.168.4.1**
 4. The dashboard loads automatically
