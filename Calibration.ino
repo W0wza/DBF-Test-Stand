@@ -67,13 +67,3 @@ void loop() {
   delay(1000);
 }
 ```
-
----
-
-That's all four files. In your GitHub repo create:
-```
-/README.md
-/ThrustStand.ino
-/Calibration.ino
-/CALIBRATION_GUIDE.md
-/CODE_EXPLAINED.md
