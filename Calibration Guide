@@ -32,6 +32,7 @@ If the load cell is oriented sideways (horizontal), hang the weight with a hook 
 3. With **nothing on the load cell**, wait for the numbers to settle.
 4. Watch the numbers for about 10 seconds and pick a stable representative value.
 5. Write this down. This is your **zero_counts**.
+6. You can also Average this number just like in Step 2
 
 Example:
 ```
