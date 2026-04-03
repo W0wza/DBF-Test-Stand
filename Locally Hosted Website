@@ -1,0 +1,563 @@
+// ════════════════════════════════════════════════════════════════════════════
+//  ThrustStand.ino
+//  ESP32 + SparkFun HX711 + Phidgets 10kg load cell
+//
+//  What this does:
+//    - Creates a WiFi hotspot called "ThrustStand"
+//    - Hosts a live thrust dashboard at 192.168.4.1
+//    - Displays current thrust, peak thrust, and a live graph
+//    - Stopwatch auto-starts when thrust exceeds 0.25 lb
+//    - Logs all data as a downloadable CSV
+//
+//  Hardware:
+//    - ESP32 Dev Module (ESP-WROOM-32)
+//    - SparkFun HX711 Load Cell Amplifier (SEN-13879)
+//    - Phidgets S-Type Load Cell 10kg (1305)
+//
+//  Wiring:
+//    Load cell RED   → HX711 RED (E+)
+//    Load cell BLACK → HX711 BLK (E-)
+//    Load cell GREEN → HX711 GRN (A+)
+//    Load cell WHITE → HX711 WHT (A-)
+//    HX711 VCC → ESP32 VIN (5V)
+//    HX711 VDD → ESP32 3V3
+//    HX711 GND → ESP32 GND
+//    HX711 DAT → ESP32 GPIO 4
+//    HX711 CLK → ESP32 GPIO 5
+//
+//  Libraries needed (install via Arduino Library Manager):
+//    - HX711 by Rob Tillaart
+//    - WiFi and WebServer are built into the ESP32 core
+// ════════════════════════════════════════════════════════════════════════════
+
+#include <WiFi.h>       // built-in: creates the WiFi access point
+#include <WebServer.h>  // built-in: handles HTTP requests from the browser
+#include "HX711.h"      // third-party: communicates with the HX711 chip
+
+// ── WiFi credentials ─────────────────────────────────────────────────────────
+// The ESP32 broadcasts this network. Connect to it from any phone or laptop.
+const char* AP_SSID = "ThrustStand";
+const char* AP_PASS = "thrust1234";
+
+// ── HX711 pin definitions ────────────────────────────────────────────────────
+// These must match your physical wiring to the ESP32.
+const int HX_DT  = 4;   // HX711 DAT → ESP32 GPIO 4
+const int HX_SCK = 5;   // HX711 CLK → ESP32 GPIO 5
+
+// ── Calibration constant ─────────────────────────────────────────────────────
+// This is the number of raw HX711 counts that equals one pound of force.
+// YOU MUST CHANGE THIS to your own calibration value.
+// See Calibration.ino and CALIBRATION_GUIDE.md for how to find your number.
+// Formula: counts_per_lb = (loaded_counts - zero_counts) / known_weight_lb
+float counts_per_lb = 206000.0;
+
+// ── Library objects ──────────────────────────────────────────────────────────
+HX711 scale;          // talks to the HX711 amplifier
+WebServer server(80); // listens for browser requests on port 80 (standard HTTP)
+
+// ── Session timer ─────────────────────────────────────────────────────────────
+// t0_ms is set at boot and again whenever Tare is pressed.
+// All time values sent to the browser are (millis() - t0_ms) / 1000.
+static unsigned long t0_ms = 0;
+
+// ── Logging flag ──────────────────────────────────────────────────────────────
+// When false, the ESP32 still reads the sensor but does not save to CSV.
+// Toggled by the Pause button on the dashboard.
+bool loggingEnabled = true;
+
+// ── In-RAM CSV log ───────────────────────────────────────────────────────────
+// All readings are appended here as "time_s,thrust_lb\n" lines.
+// Trimmed automatically when it exceeds CSV_MAX_CHARS to protect RAM.
+// This log is lost when the ESP32 loses power — download before unplugging.
+String csvLog = "time_s,thrust_lb\n";
+const size_t CSV_MAX_CHARS = 60000;  // ~3000 readings before oldest are dropped
+
+// ── Sample struct ─────────────────────────────────────────────────────────────
+// Holds one complete reading from the load cell.
+struct Sample {
+  float thrust_lb;      // clamped thrust shown on the graph (no tiny negatives)
+  float thrust_lb_raw;  // raw unclamped value (useful for debugging)
+  long  counts;         // raw integer from the HX711 before any conversion
+};
+
+// ── readSample() ──────────────────────────────────────────────────────────────
+// Reads the HX711, converts counts to pounds, and returns a Sample struct.
+Sample readSample() {
+  // read_average(3): take 3 readings and average them.
+  // More averages = less noise but slower. 3 is a good balance for 0.5s polling.
+  long counts = scale.read_average(3);
+
+  // get_offset() returns the tare zero set during setup() or when Tare is pressed
+  long offset = scale.get_offset();
+
+  // convert raw counts to pounds using the calibration constant
+  float thrust_raw = (counts - offset) / counts_per_lb;
+
+  // clamp tiny negatives caused by noise to zero so the graph looks clean at idle
+  // anything below -0.20 lb is kept as-is so real negative readings are visible
+  float thrust = thrust_raw;
+  if (thrust < 0.0f && thrust > -0.20f) thrust = 0.0f;
+
+  Sample s;
+  s.thrust_lb     = thrust;
+  s.thrust_lb_raw = thrust_raw;
+  s.counts        = counts;
+  return s;
+}
+
+// ── HTML dashboard ────────────────────────────────────────────────────────────
+// The entire webpage (HTML + CSS + JavaScript) is stored here in flash memory.
+//
+// PROGMEM: stores the string in flash instead of RAM to save precious RAM.
+//
+// R"HTMLEND(...)HTMLEND": a C++ raw string literal. Everything between the
+// delimiters is treated as plain text so HTML quotes and special characters
+// do not need escaping. The word HTMLEND is just a chosen delimiter name —
+// it must be the same on both ends and must not appear anywhere in the HTML.
+//
+// The browser polls /sample every 500ms to get a JSON reading, then updates
+// the stat cards and redraws the canvas graph.
+const char INDEX_HTML[] PROGMEM = R"HTMLEND(<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Thrust Stand</title>
+<style>
+/* ── CSS color theme variables ── */
+:root{--bg:#0d0f14;--panel:#161a22;--border:#252b38;--accent:#00e5ff;--accent2:#ff4d6d;--text:#e0e6f0;--muted:#5a6478;--green:#39ff14;}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:var(--bg);color:var(--text);font-family:sans-serif;padding:20px;}
+header{display:flex;align-items:center;gap:14px;margin-bottom:20px;border-bottom:1px solid var(--border);padding-bottom:16px;}
+/* ── Pulsing dot in the header shows the system is live ── */
+.dot{width:12px;height:12px;border-radius:50%;background:var(--accent);box-shadow:0 0 12px var(--accent);animation:pulse 2s infinite;}
+@keyframes pulse{0%,100%{opacity:1;}50%{opacity:0.3;}}
+h1{font-size:22px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;}
+h1 span{color:var(--accent);}
+.controls{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:20px;}
+button{padding:9px 18px;font-size:13px;font-weight:600;text-transform:uppercase;border:1px solid var(--border);border-radius:4px;background:var(--panel);color:var(--text);cursor:pointer;}
+button:hover{border-color:var(--accent);color:var(--accent);}
+/* ── Tare button styled green to stand out ── */
+.tare{border-color:var(--green);color:var(--green);}
+.tare:hover{background:rgba(57,255,20,0.08);}
+/* ── Stat cards grid ── */
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:20px;}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:14px 16px;}
+.lbl{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:6px;}
+.val{font-family:monospace;font-size:28px;color:var(--accent);line-height:1;}
+.val.pk{color:var(--accent2);}  /* peak value shown in red */
+.val.sm{font-size:20px;color:var(--muted);}
+.unit{font-size:12px;color:var(--muted);margin-top:4px;}
+.wrap{background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:16px;}
+canvas{display:block;width:100%;height:360px;}
+#sb{font-size:12px;color:var(--muted);font-family:monospace;margin-top:10px;}
+#sb span{color:var(--accent);}
+/* ── Stopwatch bar: fixed to the bottom of the screen always visible ── */
+#swbar{
+  position:fixed;
+  bottom:0; left:0; right:0;
+  background:#0d0f14;
+  border-top:1px solid #252b38;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  gap:20px;
+  padding:12px 20px;
+  z-index:100;
+}
+/* ── Large monospace stopwatch display ── */
+#swtime{
+  font-family:monospace;
+  font-size:32px;
+  color:var(--accent);
+  letter-spacing:0.05em;
+  min-width:120px;
+  text-align:center;
+}
+/* ── Goes grey when paused ── */
+#swtime.paused{ color:var(--muted); }
+.sw-btn{
+  padding:7px 16px;
+  font-size:12px;
+  font-weight:600;
+  text-transform:uppercase;
+  border:1px solid var(--border);
+  border-radius:4px;
+  background:var(--panel);
+  color:var(--text);
+  cursor:pointer;
+}
+.sw-btn:hover{border-color:var(--accent);color:var(--accent);}
+.sw-btn.danger:hover{border-color:var(--accent2);color:var(--accent2);}
+/* ── Push page content up so the fixed stopwatch bar does not cover it ── */
+body{ padding-bottom: 80px; }
+</style>
+</head>
+<body>
+
+<header><div class="dot"></div><h1>Thrust <span>Stand</span></h1></header>
+
+<!-- ── Top control buttons ── -->
+<div class="controls">
+  <button onclick="toggleLog()" id="lb">Pause</button>
+  <button onclick="resetPeak()">Reset Peak</button>
+  <button class="tare" onclick="doTare()">Tare</button>
+  <button onclick="dlCSV()">Download CSV</button>
+  <button onclick="clrLog()">Clear</button>
+</div>
+
+<!-- ── Live stat cards ── -->
+<div class="stats">
+  <div class="card"><div class="lbl">Current</div><div class="val" id="yc">--</div><div class="unit">lb</div></div>
+  <div class="card"><div class="lbl">Peak</div><div class="val pk" id="pc">--</div><div class="unit">lb</div></div>
+  <div class="card"><div class="lbl">Raw</div><div class="val sm" id="rc">--</div><div class="unit">lb</div></div>
+  <div class="card"><div class="lbl">Time</div><div class="val sm" id="tc">--</div><div class="unit">s</div></div>
+  <div class="card"><div class="lbl">Counts</div><div class="val sm" id="cc">--</div><div class="unit">raw</div></div>
+</div>
+
+<!-- ── Graph canvas ── -->
+<div class="wrap"><canvas id="cv"></canvas><div id="sb">Connecting...</div></div>
+
+<!-- ── Stopwatch bar pinned to the bottom of the screen ── -->
+<div id="swbar">
+  <button class="sw-btn" onclick="swPause()" id="swPauseBtn">Pause</button>
+  <div id="swtime">00:00.0</div>
+  <button class="sw-btn" onclick="swReset()">Reset</button>
+  <button class="sw-btn danger" onclick="clrLog()">Clear</button>
+</div>
+
+<script>
+// ── Graph data arrays ─────────────────────────────────────────────────────────
+// t = timestamps in seconds, y = thrust values in pounds
+// Capped at 600 points — oldest point dropped when limit is hit
+var t=[],y=[],logging=true,pk=0;
+
+// ── Canvas setup ──────────────────────────────────────────────────────────────
+var cv=document.getElementById("cv");
+var cx=cv.getContext("2d");
+
+// Graph padding in pixels: Left, Right, Top, Bottom
+var PL=52,PR=16,PT=16,PB=36;
+
+// Maximum Y axis value in pounds — change this if your motor exceeds 16 lb
+var YMX=16;
+
+// ── Stopwatch state variables ─────────────────────────────────────────────────
+var swStarted  = false; // true after the first qualifying thrust reading
+var swRunning  = false; // false when paused
+var swElapsed  = 0;     // total ms accumulated before the current segment
+var swSegStart = 0;     // Date.now() value when the current segment started
+
+// ── swStart(): called automatically on the first thrust reading over 0.25 lb ─
+function swStart() {
+  if (!swStarted) {
+    swStarted  = true;
+    swRunning  = true;
+    swSegStart = Date.now();
+  }
+}
+
+// ── swPause(): pauses or resumes the stopwatch ────────────────────────────────
+function swPause() {
+  if (!swStarted) return;
+  if (swRunning) {
+    // freeze: add the time since this segment started to the total
+    swElapsed += Date.now() - swSegStart;
+    swRunning  = false;
+    document.getElementById("swPauseBtn").textContent = "Resume";
+    document.getElementById("swtime").classList.add("paused");
+  } else {
+    // resume: start counting again from right now
+    swSegStart = Date.now();
+    swRunning  = true;
+    document.getElementById("swPauseBtn").textContent = "Pause";
+    document.getElementById("swtime").classList.remove("paused");
+  }
+}
+
+// ── swReset(): resets stopwatch to 00:00.0 and waits for next thrust event ───
+function swReset() {
+  swStarted  = false;
+  swRunning  = false;
+  swElapsed  = 0;
+  swSegStart = 0;
+  document.getElementById("swtime").textContent = "00:00.0";
+  document.getElementById("swtime").classList.remove("paused");
+  document.getElementById("swPauseBtn").textContent = "Pause";
+}
+
+// ── fmtTime(): converts milliseconds to MM:SS.T display format ───────────────
+function fmtTime(ms) {
+  var total_tenths = Math.floor(ms / 100);
+  var tenths  = total_tenths % 10;
+  var seconds = Math.floor(total_tenths / 10) % 60;
+  var minutes = Math.floor(total_tenths / 600);
+  return (minutes < 10 ? "0" : "") + minutes + ":" +
+         (seconds < 10 ? "0" : "") + seconds + "." + tenths;
+}
+
+// ── swTick(): runs every 100ms to update the stopwatch display ────────────────
+function swTick() {
+  if (!swStarted || !swRunning) return;
+  var total = swElapsed + (Date.now() - swSegStart);
+  document.getElementById("swtime").textContent = fmtTime(total);
+}
+setInterval(swTick, 100); // update 10 times per second for smooth tenths display
+
+// ── resize(): makes the canvas fill its container at any screen size ──────────
+function resize(){
+  var r=cv.parentElement.getBoundingClientRect();
+  cv.width=r.width-32;
+  cv.height=360;
+}
+resize();
+window.addEventListener("resize",function(){resize();draw();});
+
+// ── xm(): maps a time value to an X pixel position on the canvas ──────────────
+function xm(v,mn,mx){
+  var w=cv.width-PL-PR;
+  return mx===mn?PL:PL+(v-mn)*w/(mx-mn);
+}
+
+// ── ym(): maps a thrust value to a Y pixel position on the canvas ─────────────
+function ym(v){
+  var h=cv.height-PT-PB;
+  return PT+(YMX-v)*h/YMX;
+}
+
+// ── draw(): redraws the entire graph on every poll ────────────────────────────
+function draw(){
+  var W=cv.width,H=cv.height,pw=W-PL-PR,ph=H-PT-PB;
+
+  // clear and fill dark background
+  cx.fillStyle="#0d0f14";cx.fillRect(0,0,W,H);
+
+  // draw horizontal gridlines and Y-axis labels every 2 lb from 0 to 16
+  cx.font="11px monospace";cx.textAlign="right";
+  var tks=[0,2,4,6,8,10,12,14,16];
+  for(var i=0;i<tks.length;i++){
+    var v=tks[i],p=ym(v);
+    cx.strokeStyle=v===0?"#2a3040":"#1e2430";
+    cx.lineWidth=1;cx.setLineDash([4,4]);
+    cx.beginPath();cx.moveTo(PL,p);cx.lineTo(W-PR,p);cx.stroke();
+    cx.setLineDash([]);
+    cx.fillStyle="#4a5568";cx.fillText(v+" lb",PL-6,p+4);
+  }
+
+  // draw vertical gridlines and X-axis time labels
+  if(t.length>=2){
+    var mn=t[0],mx=t[t.length-1];
+    cx.textAlign="center";
+    for(var i=0;i<=6;i++){
+      var tv=mn+(mx-mn)*i/6,px=xm(tv,mn,mx);
+      cx.fillStyle="#4a5568";cx.fillText(tv.toFixed(1)+"s",px,H-PB+18);
+      cx.strokeStyle="#1e2430";cx.lineWidth=1;cx.setLineDash([2,4]);
+      cx.beginPath();cx.moveTo(px,PT);cx.lineTo(px,H-PB);cx.stroke();
+      cx.setLineDash([]);
+    }
+  }
+
+  // draw the axis border box
+  cx.strokeStyle="#252b38";cx.lineWidth=1;cx.strokeRect(PL,PT,pw,ph);
+
+  // Y-axis title (rotated 90 degrees)
+  cx.save();cx.translate(14,PT+ph/2);cx.rotate(-Math.PI/2);
+  cx.textAlign="center";cx.fillStyle="#5a6478";cx.font="11px sans-serif";
+  cx.fillText("Thrust (lb)",0,0);cx.restore();
+
+  // X-axis title
+  cx.textAlign="center";cx.fillStyle="#5a6478";cx.font="11px sans-serif";
+  cx.fillText("Time (s)",PL+pw/2,H-4);
+
+  // if not enough data yet show a waiting message
+  if(t.length<2){
+    cx.fillStyle="#2a3040";cx.font="14px sans-serif";cx.textAlign="center";
+    cx.fillText("Waiting...",PL+pw/2,PT+ph/2);return;
+  }
+
+  var mn2=t[0],mx2=t[t.length-1];
+
+  // draw the filled gradient area under the thrust curve
+  cx.beginPath();cx.moveTo(xm(t[0],mn2,mx2),ym(0));
+  for(var i=0;i<t.length;i++)cx.lineTo(xm(t[i],mn2,mx2),ym(y[i]));
+  cx.lineTo(xm(t[t.length-1],mn2,mx2),ym(0));cx.closePath();
+  var g=cx.createLinearGradient(0,PT,0,H-PB);
+  g.addColorStop(0,"rgba(0,229,255,0.18)");
+  g.addColorStop(1,"rgba(0,229,255,0.01)");
+  cx.fillStyle=g;cx.fill();
+
+  // draw the cyan thrust line with a subtle glow
+  cx.strokeStyle="#00e5ff";cx.lineWidth=2;cx.lineJoin="round";
+  cx.shadowColor="#00e5ff";cx.shadowBlur=6;
+  cx.beginPath();cx.moveTo(xm(t[0],mn2,mx2),ym(y[0]));
+  for(var i=1;i<t.length;i++)cx.lineTo(xm(t[i],mn2,mx2),ym(y[i]));
+  cx.stroke();cx.shadowBlur=0;
+
+  // draw a glowing dot at the most recent data point
+  var lx=xm(t[t.length-1],mn2,mx2),ly=ym(y[y.length-1]);
+  cx.fillStyle="#00e5ff";cx.shadowColor="#00e5ff";cx.shadowBlur=10;
+  cx.beginPath();cx.arc(lx,ly,4,0,Math.PI*2);cx.fill();cx.shadowBlur=0;
+}
+
+// ── poll(): fetches one reading from the ESP32 every 500ms ───────────────────
+function poll(){
+  fetch("/sample")
+    .then(function(r){return r.json();})
+    .then(function(j){
+      // update the stat cards with the latest values
+      document.getElementById("tc").textContent=j.time_s.toFixed(2);
+      document.getElementById("yc").textContent=j.thrust_lb.toFixed(3);
+      document.getElementById("rc").textContent=j.thrust_lb_raw.toFixed(3);
+      document.getElementById("cc").textContent=j.counts;
+
+      // update peak if this reading is the highest seen so far
+      if(j.thrust_lb>pk){pk=j.thrust_lb;document.getElementById("pc").textContent=pk.toFixed(3);}
+
+      // start the stopwatch on the first reading that exceeds 0.25 lb
+      // this threshold prevents vibration and noise from triggering the timer
+      // change 0.25 to a different value if you want a higher or lower trigger
+      if(j.thrust_lb > 0.25 && !swStarted){ swStart(); }
+
+      // add point to graph arrays, drop oldest if over 600 points
+      if(logging){
+        t.push(j.time_s);
+        y.push(j.thrust_lb);
+        if(t.length>600){t.shift();y.shift();}
+      }
+
+      // update the status bar at the bottom of the graph
+      document.getElementById("sb").innerHTML=
+        "Logging: <span>"+(logging?"ON":"OFF")+"</span> | "+
+        "Points: <span>"+t.length+"</span> | "+
+        "Latest: <span>"+j.thrust_lb.toFixed(3)+" lb</span>";
+
+      draw();
+    })
+    .catch(function(){
+      document.getElementById("sb").innerHTML=
+        "<span style='color:#ff4d6d'>Disconnected</span>";
+    });
+}
+
+// ── toggleLog(): pause or resume data logging ─────────────────────────────────
+function toggleLog(){
+  logging=!logging;
+  document.getElementById("lb").textContent=logging?"Pause":"Resume";
+  fetch("/log?enabled="+(logging?"1":"0"));
+}
+
+// ── resetPeak(): resets the peak thrust display to zero ──────────────────────
+function resetPeak(){pk=0;document.getElementById("pc").textContent="0.000";}
+
+// ── doTare(): re-zeros the scale and resets the graph and stopwatch ───────────
+function doTare(){fetch("/tare");resetPeak();t=[];y=[];swReset();draw();}
+
+// ── clrLog(): clears graph data, CSV log, peak, and stopwatch ────────────────
+function clrLog(){fetch("/clear");t=[];y=[];resetPeak();swReset();draw();}
+
+// ── dlCSV(): triggers a download of the CSV log from the ESP32 ───────────────
+function dlCSV(){window.location="/csv";}
+
+// ── start polling at 2 Hz (every 500ms) ──────────────────────────────────────
+setInterval(poll,500);
+</script>
+</body>
+</html>)HTMLEND";
+
+// ── handleRoot(): serves the dashboard HTML when browser hits 192.168.4.1 ────
+void handleRoot(){server.send(200,"text/html",INDEX_HTML);}
+
+// ── handleSample(): reads the load cell and returns JSON to the browser ───────
+void handleSample(){
+  Sample s=readSample();
+  float time_s=(millis()-t0_ms)/1000.0f;
+
+  // append to CSV log if logging is enabled
+  if(loggingEnabled){
+    char line[64];
+    snprintf(line,sizeof(line),"%.2f,%.3f\n",time_s,s.thrust_lb);
+    csvLog+=line;
+
+    // trim the oldest data if the log gets too large to protect RAM
+    if(csvLog.length()>CSV_MAX_CHARS){
+      int cut=csvLog.length()-(int)CSV_MAX_CHARS;
+      int kf=csvLog.indexOf('\n',cut);
+      if(kf>0)csvLog="time_s,thrust_lb\n"+csvLog.substring(kf+1);
+    }
+  }
+
+  // build and send the JSON response
+  String json="{";
+  json+="\"time_s\":"+String(time_s,2)+",";
+  json+="\"thrust_lb\":"+String(s.thrust_lb,3)+",";
+  json+="\"thrust_lb_raw\":"+String(s.thrust_lb_raw,3)+",";
+  json+="\"counts\":"+String(s.counts);
+  json+="}";
+  server.send(200,"application/json",json);
+}
+
+// ── handleCSV(): sends the full CSV log as a downloadable file ────────────────
+void handleCSV(){
+  server.sendHeader("Content-Type","text/csv");
+  server.sendHeader("Content-Disposition","attachment; filename=thrust_log.csv");
+  server.send(200,"text/csv",csvLog);
+}
+
+// ── handleClear(): wipes the CSV log ─────────────────────────────────────────
+void handleClear(){csvLog="time_s,thrust_lb\n";server.send(200,"text/plain","cleared");}
+
+// ── handleLogToggle(): enables or disables CSV logging ───────────────────────
+void handleLogToggle(){
+  if(server.hasArg("enabled"))loggingEnabled=(server.arg("enabled")=="1");
+  server.send(200,"text/plain",loggingEnabled?"on":"off");
+}
+
+// ── handleTare(): re-zeros the scale and resets the session timer ─────────────
+void handleTare(){
+  scale.tare(20);   // take 20 readings to establish new zero point
+  t0_ms=millis();   // reset timer so next reading starts at t=0
+  server.send(200,"text/plain","tared");
+}
+
+// ── setup(): runs once at power-on ───────────────────────────────────────────
+void setup(){
+  Serial.begin(115200);
+
+  // initialise the HX711 on the correct pins
+  scale.begin(HX_DT,HX_SCK);
+
+  // gain 128 on channel A is standard for a 350 ohm load cell
+  scale.set_gain(128);
+
+  // wait for HX711 to power up and stabilise before taring
+  delay(1000);
+
+  // tare with 30 readings for a stable zero — do this with nothing on the cell
+  scale.tare(30);
+
+  // record the boot time so all timestamps start near zero
+  t0_ms=millis();
+
+  // start the WiFi access point
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(AP_SSID,AP_PASS);
+  delay(200);
+
+  // register all the URL routes the browser can call
+  server.on("/",handleRoot);         // serves the dashboard page
+  server.on("/sample",handleSample); // returns one JSON reading
+  server.on("/csv",handleCSV);       // downloads the CSV log
+  server.on("/clear",handleClear);   // wipes the CSV log
+  server.on("/log",handleLogToggle); // toggles logging on/off
+  server.on("/tare",handleTare);     // re-zeros the scale
+  server.begin();
+
+  // print the IP to Serial Monitor so you can confirm it
+  Serial.print("AP IP: ");
+  Serial.println(WiFi.softAPIP()); // should print 192.168.4.1
+}
+
+// ── loop(): runs forever — just keeps the web server alive ───────────────────
+void loop(){
+  server.handleClient();
+}
